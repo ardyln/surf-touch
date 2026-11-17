@@ -1,0 +1,210 @@
+Description: touchbar - rudimentary touch UI (back/forward/reload/address/zoom/home)
+ A bar of large buttons and an address/search field above (or below) the
+ page, for keyboard-less tablets. Disable with touchbar = 0 in config.h.
+Author: Ardy <https://github.com/ardyln>
+Forwarded: not-needed
+---
+--- a/surf.c	2026-11-17 18:31:12.251697518 +0300
++++ b/surf.c	2026-11-17 18:31:49.537564491 +0300
+@@ -113,6 +113,7 @@
+ 	int progress, fullscreen, https, insecure, errorpage;
+ 	const char *title, *overtitle, *targeturi;
+ 	const char *needle;
++	GtkWidget *tb, *tbback, *tbfwd, *tbreload, *tburl; /* touchbar */
+ 	struct Client *next;
+ } Client;
+ 
+@@ -303,6 +304,10 @@
+ };
+ 
+ /* configuration, allows nested code to access above variables */
++/* touchbar */
++static GtkWidget *tbcreate(Client *c);
++static void tbupdate(Client *c);
++
+ #include "config.h"
+ 
+ void
+@@ -644,6 +649,7 @@
+ void
+ updatetitle(Client *c)
+ {
++	tbupdate(c);
+ 	char *title;
+ 	const char *name = c->overtitle ? c->overtitle :
+ 	                   c->title ? c->title : "";
+@@ -1361,7 +1367,18 @@
+ 	c->pageid = webkit_web_view_get_page_id(c->view);
+ 	c->win = createwindow(c);
+ 
+-	gtk_container_add(GTK_CONTAINER(c->win), GTK_WIDGET(c->view));
++	if (touchbar) {
++		GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
++		c->tb = tbcreate(c);
++		if (!touchbarbottom)
++			gtk_box_pack_start(GTK_BOX(box), c->tb, FALSE, FALSE, 0);
++		gtk_box_pack_start(GTK_BOX(box), GTK_WIDGET(c->view), TRUE, TRUE, 0);
++		if (touchbarbottom)
++			gtk_box_pack_start(GTK_BOX(box), c->tb, FALSE, FALSE, 0);
++		gtk_container_add(GTK_CONTAINER(c->win), box);
++	} else {
++		gtk_container_add(GTK_CONTAINER(c->win), GTK_WIDGET(c->view));
++	}
+ 	gtk_widget_show_all(c->win);
+ 	gtk_widget_grab_focus(GTK_WIDGET(c->view));
+ 
+@@ -1989,6 +2006,138 @@
+ 	spawn(c, &arg);
+ }
+ 
++
++/* touchbar: a rudimentary touch UI (back, forward, reload/stop, address,
++ * zoom, home) for keyboard-less tablets. Toggle with `touchbar` in config.h. */
++static void
++tbclicked(GtkButton *b, Client *c)
++{
++	const char *w = g_object_get_data(G_OBJECT(b), "tbcmd");
++	Arg a = { .i = 0 };
++
++	if (!strcmp(w, "back")) {
++		a.i = -1; navigate(c, &a);
++	} else if (!strcmp(w, "fwd")) {
++		a.i = +1; navigate(c, &a);
++	} else if (!strcmp(w, "reload")) {
++		if (webkit_web_view_is_loading(c->view))
++			stop(c, &a);
++		else
++			reload(c, &a);
++	} else if (!strcmp(w, "zin")) {
++		a.i = +1; zoom(c, &a);
++	} else if (!strcmp(w, "zout")) {
++		a.i = -1; zoom(c, &a);
++	} else if (!strcmp(w, "home")) {
++		a.v = touchhome; loaduri(c, &a);
++	}
++	gtk_widget_grab_focus(GTK_WIDGET(c->view));
++}
++
++static void
++tbactivate(GtkEntry *e, Client *c)
++{
++	const char *t = gtk_entry_get_text(e);
++	char *q = NULL, *enc;
++	Arg a;
++
++	while (*t == ' ')
++		t++;
++	if (!*t)
++		return;
++	/* words without a dot or scheme: search */
++	if (!strstr(t, "://") && !g_str_has_prefix(t, "about:") &&
++	    (strchr(t, ' ') || !strchr(t, '.')) && t[0] != '/' && t[0] != '~') {
++		enc = g_uri_escape_string(t, NULL, TRUE);
++		q = g_strdup_printf(touchsearch, enc);
++		g_free(enc);
++		a.v = q;
++	} else {
++		a.v = t;
++	}
++	loaduri(c, &a);
++	g_free(q);
++	gtk_widget_grab_focus(GTK_WIDGET(c->view));
++}
++
++static gboolean
++tburlfocus(GtkWidget *w, GdkEvent *e, Client *c)
++{
++	/* select everything on tap, so typing replaces the address */
++	gtk_editable_select_region(GTK_EDITABLE(w), 0, -1);
++	return FALSE;
++}
++
++static GtkWidget *
++tbbutton(Client *c, const char *label, const char *cmd)
++{
++	GtkWidget *b = gtk_button_new_with_label(label);
++
++	gtk_widget_set_can_focus(b, FALSE);
++	g_object_set_data(G_OBJECT(b), "tbcmd", (gpointer)cmd);
++	g_signal_connect(b, "clicked", G_CALLBACK(tbclicked), c);
++	return b;
++}
++
++GtkWidget *
++tbcreate(Client *c)
++{
++	GtkWidget *bar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 2);
++	GtkCssProvider *css = gtk_css_provider_new();
++	char *style = g_strdup_printf(
++	    ".surftb button { min-height: %dpx; min-width: %dpx; padding: 0 6px;"
++	    " font-size: %dpx; } .surftb entry { min-height: %dpx; font-size: %dpx; }",
++	    touchbarheight, touchbarheight, touchbarheight / 2,
++	    touchbarheight, touchbarheight * 2 / 5);
++
++	gtk_css_provider_load_from_data(css, style, -1, NULL);
++	g_free(style);
++	gtk_style_context_add_provider_for_screen(gdk_screen_get_default(),
++	    GTK_STYLE_PROVIDER(css), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
++	g_object_unref(css);
++	gtk_style_context_add_class(gtk_widget_get_style_context(bar), "surftb");
++
++	c->tbback = tbbutton(c, "◀", "back");
++	c->tbfwd = tbbutton(c, "▶", "fwd");
++	c->tbreload = tbbutton(c, "⟳", "reload");
++	c->tburl = gtk_entry_new();
++	gtk_entry_set_input_purpose(GTK_ENTRY(c->tburl), GTK_INPUT_PURPOSE_URL);
++	gtk_entry_set_placeholder_text(GTK_ENTRY(c->tburl), "address or search");
++	g_signal_connect(c->tburl, "activate", G_CALLBACK(tbactivate), c);
++	g_signal_connect(c->tburl, "focus-in-event", G_CALLBACK(tburlfocus), c);
++
++	gtk_box_pack_start(GTK_BOX(bar), c->tbback, FALSE, FALSE, 0);
++	gtk_box_pack_start(GTK_BOX(bar), c->tbfwd, FALSE, FALSE, 0);
++	gtk_box_pack_start(GTK_BOX(bar), c->tbreload, FALSE, FALSE, 0);
++	gtk_box_pack_start(GTK_BOX(bar), c->tburl, TRUE, TRUE, 0);
++	gtk_box_pack_start(GTK_BOX(bar), tbbutton(c, "−", "zout"), FALSE, FALSE, 0);
++	gtk_box_pack_start(GTK_BOX(bar), tbbutton(c, "+", "zin"), FALSE, FALSE, 0);
++	gtk_box_pack_start(GTK_BOX(bar), tbbutton(c, "⌂", "home"), FALSE, FALSE, 0);
++	return bar;
++}
++
++void
++tbupdate(Client *c)
++{
++	const char *uri;
++	int loading;
++
++	if (!c->tb)
++		return;
++	loading = webkit_web_view_is_loading(c->view);
++	gtk_widget_set_sensitive(c->tbback, webkit_web_view_can_go_back(c->view));
++	gtk_widget_set_sensitive(c->tbfwd, webkit_web_view_can_go_forward(c->view));
++	gtk_button_set_label(GTK_BUTTON(c->tbreload), loading ? "✕" : "⟳");
++	gtk_entry_set_progress_fraction(GTK_ENTRY(c->tburl),
++	    loading && c->progress < 100 ? c->progress / 100.0 : 0.0);
++	/* don't overwrite what the user is typing */
++	if (!gtk_widget_has_focus(c->tburl) && (uri = geturi(c)) &&
++	    strcmp(uri, "about:blank") &&
++	    strcmp(gtk_entry_get_text(GTK_ENTRY(c->tburl)), uri))
++		gtk_entry_set_text(GTK_ENTRY(c->tburl), uri);
++}
++
++
+ int
+ main(int argc, char *argv[])
+ {
+--- a/config.def.h	2026-11-17 18:31:12.247458084 +0300
++++ b/config.def.h	2026-11-17 18:31:49.538370527 +0300
+@@ -7,6 +7,13 @@
+ static char *cachedir       = "~/.surf/cache/";
+ static char *cookiefile     = "~/.surf/cookies.txt";
+ 
++/* touchbar: big back/forward/reload/address/zoom/home buttons for touch */
++static int touchbar         = 1;   /* 0 = plain surf without the bar */
++static int touchbarbottom   = 0;   /* 1 = bar at the bottom (thumb reach) */
++static int touchbarheight   = 44;  /* button height in px */
++static char *touchhome      = "https://html.duckduckgo.com/html/";
++static char *touchsearch    = "https://html.duckduckgo.com/html/?q=%s";
++
+ /* Webkit default features */
+ /* Highest priority value will be used.
+  * Default parameters are priority 0

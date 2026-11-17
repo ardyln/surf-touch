@@ -1,0 +1,125 @@
+Description: run on Wayland natively when available
+ The Debian force-x11 patch pins surf to X11 because a few features use
+ Xlib directly. Make those X11-only (window properties for dmenu go/find,
+ XEmbed via -e) and let GDK pick Wayland first. Fixes a crash on 32-bit
+ systems where GTK3's X11 backend overflows the monitor refresh rate
+ (reported as ~0 Hz) and WebKitGTK 2.54 divides by it.
+ Set usewayland = 0 in config.h to keep X11.
+Author: Ardy <https://github.com/ardyln>
+Forwarded: not-needed
+---
+--- b/surf.c	2026-11-17 18:31:49.537564491 +0300
++++ c/surf.c	2026-11-17 18:41:50.461224236 +0300
+@@ -252,6 +252,7 @@
+ static int showxid;
+ static int cookiepolicy;
+ static Display *dpy;
++static int isx11; /* wayland: running on the X11 backend */
+ static Client *clients;
+ static GdkDevice *gdkkb;
+ static char *stylefile;
+@@ -341,19 +342,22 @@
+ 	if (signal(SIGHUP, sighup) == SIG_ERR)
+ 		die("Can't install SIGHUP handler");
+ 
+-	if (!(dpy = XOpenDisplay(NULL)))
+-		die("Can't open default display");
+-
+-	/* atoms */
+-	atoms[AtomFind] = XInternAtom(dpy, "_SURF_FIND", False);
+-	atoms[AtomGo] = XInternAtom(dpy, "_SURF_GO", False);
+-	atoms[AtomUri] = XInternAtom(dpy, "_SURF_URI", False);
+-	atoms[AtomUTF8] = XInternAtom(dpy, "UTF8_STRING", False);
+-
+-	gdk_set_allowed_backends("x11");
++	gdk_set_allowed_backends(usewayland ? "wayland,x11" : "x11");
+ 	gtk_init(NULL, NULL);
+ 
+ 	gdpy = gdk_display_get_default();
++	isx11 = GDK_IS_X11_DISPLAY(gdpy);
++
++	if (isx11) {
++		if (!(dpy = XOpenDisplay(NULL)))
++			die("Can't open default display");
++
++		/* atoms */
++		atoms[AtomFind] = XInternAtom(dpy, "_SURF_FIND", False);
++		atoms[AtomGo] = XInternAtom(dpy, "_SURF_GO", False);
++		atoms[AtomUri] = XInternAtom(dpy, "_SURF_URI", False);
++		atoms[AtomUTF8] = XInternAtom(dpy, "UTF8_STRING", False);
++	}
+ 
+ 	curconfig = defconfig;
+ 
+@@ -618,6 +622,8 @@
+ void
+ setatom(Client *c, int a, const char *v)
+ {
++	if (!isx11)
++		return;
+ 	XChangeProperty(dpy, c->xid,
+ 	                atoms[a], atoms[AtomUTF8], 8, PropModeReplace,
+ 	                (unsigned char *)v, strlen(v) + 1);
+@@ -633,6 +639,8 @@
+ 	unsigned long ldummy;
+ 	unsigned char *p = NULL;
+ 
++	if (!isx11)
++		return "";
+ 	XSync(dpy, False);
+ 	XGetWindowProperty(dpy, c->xid,
+ 	                   atoms[a], 0L, BUFSIZ, False, atoms[AtomUTF8],
+@@ -1101,7 +1109,8 @@
+ 	g_free(scriptfile);
+ 	g_free(stylefile);
+ 	g_free(cachedir);
+-	XCloseDisplay(dpy);
++	if (dpy)
++		XCloseDisplay(dpy);
+ }
+ 
+ WebKitWebView *
+@@ -1383,9 +1392,11 @@
+ 	gtk_widget_grab_focus(GTK_WIDGET(c->view));
+ 
+ 	gwin = gtk_widget_get_window(GTK_WIDGET(c->win));
+-	c->xid = gdk_x11_window_get_xid(gwin);
+-	updatewinid(c);
+-	if (showxid) {
++	if (isx11) {
++		c->xid = gdk_x11_window_get_xid(gwin);
++		updatewinid(c);
++	}
++	if (showxid && isx11) {
+ 		gdk_display_sync(gtk_widget_get_display(c->win));
+ 		puts(winid);
+ 		fflush(stdout);
+@@ -1396,7 +1407,8 @@
+ 
+ 	if (!curconfig[KioskMode].val.i) {
+ 		gdk_window_set_events(gwin, GDK_ALL_EVENTS_MASK);
+-		gdk_window_add_filter(gwin, processx, c);
++		if (isx11)
++			gdk_window_add_filter(gwin, processx, c);
+ 	}
+ 
+ 	if (curconfig[RunInFullscreen].val.i)
+@@ -1416,7 +1428,7 @@
+ 	char *wmstr;
+ 	GtkWidget *w;
+ 
+-	if (embed) {
++	if (embed && isx11) {
+ 		w = gtk_plug_new(embed);
+ 	} else {
+ 		w = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+--- b/config.def.h	2026-11-17 18:31:49.538370527 +0300
++++ c/config.def.h	2026-11-17 18:41:50.461510352 +0300
+@@ -8,6 +8,7 @@
+ static char *cookiefile     = "~/.surf/cookies.txt";
+ 
+ /* touchbar: big back/forward/reload/address/zoom/home buttons for touch */
++static int usewayland       = 1;   /* native Wayland if available (X11-only: -e embedding, _SURF_* props) */
+ static int touchbar         = 1;   /* 0 = plain surf without the bar */
+ static int touchbarbottom   = 0;   /* 1 = bar at the bottom (thumb reach) */
+ static int touchbarheight   = 44;  /* button height in px */
