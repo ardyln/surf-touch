@@ -1,0 +1,404 @@
+diff -ruN work-base/config.def.h work/config.def.h
+--- work-base/config.def.h	2026-11-18 21:50:38.656306233 +0300
++++ work/config.def.h	2026-11-18 21:52:38.027595578 +0300
+@@ -14,6 +14,8 @@
+ static int touchbarheight   = 44;  /* button height in px */
+ static char *touchhome      = "https://html.duckduckgo.com/html/";
+ static char *touchsearch    = "https://html.duckduckgo.com/html/?q=%s";
++static char *bookmarkfile   = "~/.surf/bookmarks"; /* "" = no bookmarks button/menu */
++static int touchfullscreen  = 1;   /* 1 = fullscreen button on the touchbar */
+ 
+ /* Webkit default features */
+ /* Highest priority value will be used.
+@@ -138,9 +140,9 @@
+  */
+ static Key keys[] = {
+ 	/* modifier              keyval          function    arg */
+-	{ MODKEY,                GDK_KEY_g,      spawn,      SETPROP("_SURF_URI", "_SURF_GO", PROMPT_GO) },
+-	{ MODKEY,                GDK_KEY_f,      spawn,      SETPROP("_SURF_FIND", "_SURF_FIND", PROMPT_FIND) },
+-	{ MODKEY,                GDK_KEY_slash,  spawn,      SETPROP("_SURF_FIND", "_SURF_FIND", PROMPT_FIND) },
++	{ MODKEY,                GDK_KEY_g,      go,         SETPROP("_SURF_URI", "_SURF_GO", PROMPT_GO) },
++	{ MODKEY,                GDK_KEY_f,      findprompt, SETPROP("_SURF_FIND", "_SURF_FIND", PROMPT_FIND) },
++	{ MODKEY,                GDK_KEY_slash,  findprompt, SETPROP("_SURF_FIND", "_SURF_FIND", PROMPT_FIND) },
+ 
+ 	{ 0,                     GDK_KEY_Escape, stop,       { 0 } },
+ 	{ MODKEY,                GDK_KEY_c,      stop,       { 0 } },
+@@ -177,6 +179,17 @@
+ 
+ 	{ MODKEY|GDK_SHIFT_MASK, GDK_KEY_a,      togglecookiepolicy, { 0 } },
+ 	{ 0,                     GDK_KEY_F11,    togglefullscreen, { 0 } },
++
++	/* surf-touch extras: common browser keys (surf's own bindings above stay) */
++	{ 0,                     GDK_KEY_F6,     focusaddress, { 0 } },
++	{ GDK_MOD1_MASK,         GDK_KEY_d,      focusaddress, { 0 } },
++	{ GDK_MOD1_MASK,         GDK_KEY_Left,   navigate,   { .i = -1 } },
++	{ GDK_MOD1_MASK,         GDK_KEY_Right,  navigate,   { .i = +1 } },
++	{ 0,                     GDK_KEY_F5,     reload,     { .i = 0 } },
++	{ MODKEY,                GDK_KEY_equal,  zoom,       { .i = +1 } },
++	{ MODKEY,                GDK_KEY_0,      zoom,       { .i = 0  } },
++	{ MODKEY,                GDK_KEY_d,      bookmarktoggle, { 0 } },
++	{ MODKEY,                GDK_KEY_m,      bookmarkmenu, { 0 } },
+ 	{ MODKEY|GDK_SHIFT_MASK, GDK_KEY_o,      toggleinspector, { 0 } },
+ 
+ 	{ MODKEY|GDK_SHIFT_MASK, GDK_KEY_c,      toggle,     { .i = CaretBrowsing } },
+diff -ruN work-base/surf.c work/surf.c
+--- work-base/surf.c	2026-11-18 21:50:38.654990067 +0300
++++ work/surf.c	2026-11-18 21:52:24.861483542 +0300
+@@ -36,7 +36,7 @@
+ #include "common.h"
+ 
+ #define LENGTH(x)               (sizeof(x) / sizeof(x[0]))
+-#define CLEANMASK(mask)         (mask & (MODKEY|GDK_SHIFT_MASK))
++#define CLEANMASK(mask)         (mask & (MODKEY|GDK_SHIFT_MASK|GDK_MOD1_MASK))
+ 
+ enum { AtomFind, AtomGo, AtomUri, AtomUTF8, AtomLast };
+ 
+@@ -114,6 +114,7 @@
+ 	const char *title, *overtitle, *targeturi;
+ 	const char *needle;
+ 	GtkWidget *tb, *tbback, *tbfwd, *tbreload, *tburl; /* touchbar */
++	GtkWidget *tbbar, *tbfind, *tbfindentry; /* extras: button row, find bar */
+ 	struct Client *next;
+ } Client;
+ 
+@@ -308,6 +309,14 @@
+ /* touchbar */
+ static GtkWidget *tbcreate(Client *c);
+ static void tbupdate(Client *c);
++static GtkWidget *tbfindcreate(Client *c, GtkWidget *bar);
++/* extras: fullscreen button, bookmarks, Wayland-friendly address/find */
++static void focusaddress(Client *c, const Arg *a);
++static void go(Client *c, const Arg *a);
++static void findprompt(Client *c, const Arg *a);
++static void findbar(Client *c, const Arg *a);
++static void bookmarktoggle(Client *c, const Arg *a);
++static void bookmarkmenu(Client *c, const Arg *a);
+ 
+ #include "config.h"
+ 
+@@ -364,6 +373,8 @@
+ 	/* dirs and files */
+ 	cookiefile = buildfile(cookiefile);
+ 	scriptfile = buildfile(scriptfile);
++	if (bookmarkfile && *bookmarkfile)
++		bookmarkfile = buildfile(bookmarkfile);
+ 	certdir    = buildpath(certdir);
+ 	if (curconfig[Ephemeral].val.i)
+ 		cachedir = NULL;
+@@ -1335,6 +1346,17 @@
+ 		updatetitle(c);
+ 		break;
+ 	case GDK_KEY_PRESS:
++		if (e->key.keyval == GDK_KEY_Escape && c->tbfindentry &&
++		    gtk_widget_has_focus(c->tbfindentry)) {
++			findbar(c, &(Arg){ .i = -1 });
++			return TRUE;
++		}
++		if (e->key.keyval == GDK_KEY_Escape && c->tburl &&
++		    gtk_widget_has_focus(c->tburl)) {
++			gtk_entry_set_text(GTK_ENTRY(c->tburl), geturi(c) ? geturi(c) : "");
++			gtk_widget_grab_focus(GTK_WIDGET(c->view));
++			return TRUE;
++		}
+ 		if (!curconfig[KioskMode].val.i) {
+ 			for (i = 0; i < LENGTH(keys); ++i) {
+ 				if (gdk_keyval_to_lower(e->key.keyval) ==
+@@ -1979,6 +2001,10 @@
+ 		else
+ 			webkit_find_controller_search_previous(c->finder);
+ 	} else {
++		if (!isx11) {
++			findbar(c, a);
++			return;
++		}
+ 		s = getatom(c, AtomFind);
+ 		f = webkit_find_controller_get_search_text(c->finder);
+ 
+@@ -2042,6 +2068,11 @@
+ 		a.i = -1; zoom(c, &a);
+ 	} else if (!strcmp(w, "home")) {
+ 		a.v = touchhome; loaduri(c, &a);
++	} else if (!strcmp(w, "full")) {
++		togglefullscreen(c, &a);
++	} else if (!strcmp(w, "bm")) {
++		bookmarkmenu(c, &a);
++		return; /* the menu takes focus */
+ 	}
+ 	gtk_widget_grab_focus(GTK_WIDGET(c->view));
+ }
+@@ -2098,8 +2129,10 @@
+ 	GtkCssProvider *css = gtk_css_provider_new();
+ 	char *style = g_strdup_printf(
+ 	    ".surftb button { min-height: %dpx; min-width: %dpx; padding: 0 6px;"
+-	    " font-size: %dpx; } .surftb entry { min-height: %dpx; font-size: %dpx; }",
++	    " font-size: %dpx; } .surftb entry { min-height: %dpx; font-size: %dpx; }"
++	    " .surfmenu menuitem { min-height: %dpx; font-size: %dpx; }",
+ 	    touchbarheight, touchbarheight, touchbarheight / 2,
++	    touchbarheight, touchbarheight * 2 / 5,
+ 	    touchbarheight, touchbarheight * 2 / 5);
+ 
+ 	gtk_css_provider_load_from_data(css, style, -1, NULL);
+@@ -2125,7 +2158,12 @@
+ 	gtk_box_pack_start(GTK_BOX(bar), tbbutton(c, "−", "zout"), FALSE, FALSE, 0);
+ 	gtk_box_pack_start(GTK_BOX(bar), tbbutton(c, "+", "zin"), FALSE, FALSE, 0);
+ 	gtk_box_pack_start(GTK_BOX(bar), tbbutton(c, "⌂", "home"), FALSE, FALSE, 0);
+-	return bar;
++	if (bookmarkfile && *bookmarkfile)
++		gtk_box_pack_start(GTK_BOX(bar), tbbutton(c, "☆", "bm"), FALSE, FALSE, 0);
++	if (touchfullscreen)
++		gtk_box_pack_start(GTK_BOX(bar), tbbutton(c, "⛶", "full"), FALSE, FALSE, 0);
++	c->tbbar = bar;
++	return tbfindcreate(c, bar);
+ }
+ 
+ void
+@@ -2149,6 +2187,249 @@
+ 		gtk_entry_set_text(GTK_ENTRY(c->tburl), uri);
+ }
+ 
++/* ---- extras: find bar, address focus, bookmarks (Wayland-friendly; X11 keeps dmenu) ---- */
++
++static void
++findsearch(GtkSearchEntry *e, Client *c)
++{
++	const char *t = gtk_entry_get_text(GTK_ENTRY(e));
++
++	if (*t)
++		webkit_find_controller_search(c->finder, t, findopts, G_MAXUINT);
++	else
++		webkit_find_controller_search_finish(c->finder);
++}
++
++static void
++findstep(GtkWidget *w, Client *c)
++{
++	int dir = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(w), "dir"));
++
++	if (dir > 0)
++		webkit_find_controller_search_next(c->finder);
++	else if (dir < 0)
++		webkit_find_controller_search_previous(c->finder);
++	else
++		findbar(c, &(Arg){ .i = -1 });
++}
++
++static gboolean
++findkey(GtkWidget *w, GdkEventKey *e, Client *c)
++{
++	/* Enter = next, Shift+Enter = previous */
++	if (e->keyval == GDK_KEY_Return || e->keyval == GDK_KEY_KP_Enter) {
++		if (e->state & GDK_SHIFT_MASK)
++			webkit_find_controller_search_previous(c->finder);
++		else
++			webkit_find_controller_search_next(c->finder);
++		return TRUE;
++	}
++	return FALSE;
++}
++
++static GtkWidget *
++findbutton(Client *c, const char *label, int dir)
++{
++	GtkWidget *b = gtk_button_new_with_label(label);
++
++	gtk_widget_set_can_focus(b, FALSE);
++	g_object_set_data(G_OBJECT(b), "dir", GINT_TO_POINTER(dir));
++	g_signal_connect(b, "clicked", G_CALLBACK(findstep), c);
++	return b;
++}
++
++static GtkWidget *
++tbfindcreate(Client *c, GtkWidget *bar)
++{
++	GtkWidget *outer = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
++
++	c->tbfind = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 2);
++	gtk_style_context_add_class(gtk_widget_get_style_context(c->tbfind), "surftb");
++	c->tbfindentry = gtk_search_entry_new();
++	gtk_entry_set_placeholder_text(GTK_ENTRY(c->tbfindentry), "find in page");
++	g_signal_connect(c->tbfindentry, "search-changed", G_CALLBACK(findsearch), c);
++	g_signal_connect(c->tbfindentry, "key-press-event", G_CALLBACK(findkey), c);
++	gtk_box_pack_start(GTK_BOX(c->tbfind), c->tbfindentry, TRUE, TRUE, 0);
++	gtk_box_pack_start(GTK_BOX(c->tbfind), findbutton(c, "▲", -1), FALSE, FALSE, 0);
++	gtk_box_pack_start(GTK_BOX(c->tbfind), findbutton(c, "▼", +1), FALSE, FALSE, 0);
++	gtk_box_pack_start(GTK_BOX(c->tbfind), findbutton(c, "✕", 0), FALSE, FALSE, 0);
++	gtk_widget_set_no_show_all(c->tbfind, TRUE);
++
++	gtk_box_pack_start(GTK_BOX(outer), bar, FALSE, FALSE, 0);
++	gtk_box_pack_start(GTK_BOX(outer), c->tbfind, FALSE, FALSE, 0);
++	return outer;
++}
++
++/* a->i < 0 closes the find bar, anything else opens it */
++void
++findbar(Client *c, const Arg *a)
++{
++	if (!c->tbfind)
++		return;
++	if (a && a->i < 0) {
++		webkit_find_controller_search_finish(c->finder);
++		gtk_widget_hide(c->tbfind);
++		gtk_widget_grab_focus(GTK_WIDGET(c->view));
++		return;
++	}
++	gtk_widget_show_all(c->tbfind);
++	gtk_widget_grab_focus(c->tbfindentry);
++	gtk_editable_select_region(GTK_EDITABLE(c->tbfindentry), 0, -1);
++}
++
++void
++focusaddress(Client *c, const Arg *a)
++{
++	if (!c->tburl)
++		return;
++	gtk_widget_grab_focus(c->tburl);
++	gtk_editable_select_region(GTK_EDITABLE(c->tburl), 0, -1);
++}
++
++/* Ctrl+G: dmenu prompt on X11, the touchbar address on Wayland */
++void
++go(Client *c, const Arg *a)
++{
++	if (isx11 || !c->tburl)
++		spawn(c, a);
++	else
++		focusaddress(c, a);
++}
++
++/* Ctrl+F, Ctrl+/: dmenu prompt on X11, the find bar on Wayland */
++void
++findprompt(Client *c, const Arg *a)
++{
++	if (isx11 || !c->tbfind)
++		spawn(c, a);
++	else
++		findbar(c, &(Arg){ .i = 0 });
++}
++
++/* bookmarks: one "uri<TAB>title" per line in bookmarkfile */
++static char **
++bmread(void)
++{
++	char *data = NULL, **lines;
++
++	if (!bookmarkfile || !*bookmarkfile ||
++	    !g_file_get_contents(bookmarkfile, &data, NULL, NULL))
++		return g_new0(char *, 1);
++	lines = g_strsplit(data, "\n", -1);
++	g_free(data);
++	return lines;
++}
++
++static int
++bmfind(char **lines, const char *uri)
++{
++	int i;
++	size_t n = strlen(uri);
++
++	for (i = 0; lines[i]; i++)
++		if (!strncmp(lines[i], uri, n) &&
++		    (lines[i][n] == '\t' || lines[i][n] == '\0'))
++			return i;
++	return -1;
++}
++
++void
++bookmarktoggle(Client *c, const Arg *a)
++{
++	const char *uri = geturi(c), *title = c->title ? c->title : "";
++	char **lines, *t, *out;
++	GString *s;
++	int i, at;
++
++	if (!uri || !*uri || !strcmp(uri, "about:blank") || !bookmarkfile || !*bookmarkfile)
++		return;
++	lines = bmread();
++	at = bmfind(lines, uri);
++	s = g_string_new(NULL);
++	for (i = 0; lines[i]; i++)
++		if (i != at && *lines[i])
++			g_string_append_printf(s, "%s\n", lines[i]);
++	if (at < 0) {
++		t = g_strdelimit(g_strdup(title), "\t\n", ' ');
++		g_string_append_printf(s, "%s\t%s\n", uri, t);
++		g_free(t);
++	}
++	out = g_string_free(s, FALSE);
++	g_file_set_contents(bookmarkfile, out, -1, NULL);
++	g_free(out);
++	g_strfreev(lines);
++}
++
++static void
++bmactivate(GtkMenuItem *m, Client *c)
++{
++	const char *cmd = g_object_get_data(G_OBJECT(m), "bmcmd");
++	Arg a = { .i = 0 };
++
++	if (!strcmp(cmd, "toggle")) {
++		bookmarktoggle(c, &a);
++	} else if (!strcmp(cmd, "find")) {
++		findbar(c, &a);
++		return;
++	} else {
++		a.v = cmd;
++		loaduri(c, &a);
++	}
++	gtk_widget_grab_focus(GTK_WIDGET(c->view));
++}
++
++static GtkWidget *
++bmitem(Client *c, GtkWidget *menu, const char *label, const char *cmd)
++{
++	GtkWidget *m = gtk_menu_item_new_with_label(label);
++
++	g_object_set_data_full(G_OBJECT(m), "bmcmd", g_strdup(cmd), g_free);
++	g_signal_connect(m, "activate", G_CALLBACK(bmactivate), c);
++	gtk_menu_shell_append(GTK_MENU_SHELL(menu), m);
++	return m;
++}
++
++void
++bookmarkmenu(Client *c, const Arg *a)
++{
++	GtkWidget *menu = gtk_menu_new(), *m;
++	const char *uri = geturi(c);
++	char **lines = bmread(), **f, *label;
++	int i, have = uri && bmfind(lines, uri) >= 0;
++
++	gtk_style_context_add_class(gtk_widget_get_style_context(menu), "surfmenu");
++	bmitem(c, menu, have ? "☆  Remove bookmark" : "★  Bookmark this page", "toggle");
++	if (c->tbfind)
++		bmitem(c, menu, "🔍  Find in page", "find");
++	gtk_menu_shell_append(GTK_MENU_SHELL(menu), gtk_separator_menu_item_new());
++	for (i = 0; lines[i]; i++) {
++		if (!*lines[i])
++			continue;
++		f = g_strsplit(lines[i], "\t", 2);
++		label = (f[1] && *f[1]) ? g_strdup(f[1]) : g_strdup(f[0]);
++		if (g_utf8_strlen(label, -1) > 48) {
++			char *cut = g_utf8_substring(label, 0, 47);
++			g_free(label);
++			label = g_strconcat(cut, "…", NULL);
++			g_free(cut);
++		}
++		m = bmitem(c, menu, label, f[0]);
++		gtk_widget_set_tooltip_text(m, f[0]);
++		g_free(label);
++		g_strfreev(f);
++	}
++	g_strfreev(lines);
++	gtk_widget_show_all(menu);
++	g_signal_connect(menu, "deactivate", G_CALLBACK(gtk_widget_destroy), NULL);
++	if (c->tbbar)
++		gtk_menu_popup_at_widget(GTK_MENU(menu), c->tbbar,
++		    touchbarbottom ? GDK_GRAVITY_NORTH_EAST : GDK_GRAVITY_SOUTH_EAST,
++		    touchbarbottom ? GDK_GRAVITY_SOUTH_EAST : GDK_GRAVITY_NORTH_EAST, NULL);
++	else
++		gtk_menu_popup_at_widget(GTK_MENU(menu), GTK_WIDGET(c->view),
++		    GDK_GRAVITY_CENTER, GDK_GRAVITY_CENTER, NULL);
++}
++
+ 
+ int
+ main(int argc, char *argv[])

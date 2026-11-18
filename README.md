@@ -1,7 +1,7 @@
 # surf-touch
 
 [surf](https://surf.suckless.org/) with a rudimentary touch UI, for tablets
-without a keyboard. Two small patches on top of Debian's surf package:
+without a keyboard. Three small patches on top of Debian's surf package:
 
 - **touchbar**: a row of large buttons above (or below) the page:
   back, forward, reload/stop, an address field that also searches,
@@ -10,6 +10,9 @@ without a keyboard. Two small patches on top of Debian's surf package:
   Debian's forced X11. Besides sharper rendering, real touch input and the
   GNOME on-screen keyboard for the address field, this works around a crash
   in WebKitGTK 2.54 on 32-bit systems (see [Why Wayland](#why-wayland)).
+- **extras**: a fullscreen button, bookmarks, a find bar, and keyboard
+  shortcuts that work on Wayland (surf's dmenu-based go/find need X11), plus
+  a few common browser keys.
 
 Everything else is plain surf: same keybindings, same `~/.surf` directory,
 same `config.h` way of configuring it.
@@ -20,7 +23,8 @@ GNOME on Wayland, touch only), but nothing in it is specific to that tablet.
 ## The touchbar
 
 ```
-[ ◀ ][ ▶ ][ ⟳ ][ address or search ............ ][ − ][ + ][ ⌂ ]
+[ ◀ ][ ▶ ][ ⟳ ][ address or search ............ ][ − ][ + ][ ⌂ ][ ☆ ][ ⛶ ]
+[ find in page ................................ ][ ▲ ][ ▼ ][ ✕ ]   (only while finding)
 ```
 
 | Button | Does |
@@ -30,6 +34,9 @@ GNOME on Wayland, touch only), but nothing in it is specific to that tablet.
 | address field | shows the current address. Tapping it selects everything, so typing replaces it. Enter loads it. Input without a dot or `://` (or with spaces) is sent to the search engine. While a page loads the field fills up as a progress bar |
 | − / + | zoom out / in (surf's own zoom) |
 | ⌂ | home page |
+| ☆ | bookmarks menu: *Bookmark this page* / *Remove bookmark*, *Find in page*, then your bookmarks (tap one to open it) |
+| ⛶ | fullscreen on/off; the bar stays visible so you can always leave fullscreen by touch |
+| find bar | appears under the bar for *Find in page* or Ctrl+F: matches as you type, ▲/▼ previous/next, ✕ or Esc closes it |
 
 The buttons never take keyboard focus, so surf's own keybindings keep
 working when a keyboard is attached.
@@ -44,6 +51,38 @@ working when a keyboard is attached.
 | `touchhome` | `https://html.duckduckgo.com/html/` | the ⌂ page |
 | `touchsearch` | `https://html.duckduckgo.com/html/?q=%s` | search URL, `%s` is the escaped query |
 | `usewayland` | `1` | prefer Wayland; `0` keeps surf on X11 |
+| `bookmarkfile` | `~/.surf/bookmarks` | where bookmarks are kept; `""` removes the ☆ button and menu |
+| `touchfullscreen` | `1` | `0` hides the ⛶ button (F11 still works) |
+
+Bookmarks are a plain text file, one `address<TAB>title` per line, so they
+are easy to edit, sync or share by hand.
+
+### Keyboard
+
+All of surf's own keybindings stay. On Wayland, the two that relied on X11
+(dmenu) now use the touchbar instead; on X11 they behave as before:
+
+| Keys | Does |
+|---|---|
+| Ctrl+G | focus the address field (X11: surf's dmenu prompt) |
+| Ctrl+F, Ctrl+/ | open the find bar (X11: dmenu prompt). Enter = next, Shift+Enter = previous, Esc closes |
+| Ctrl+N / Ctrl+Shift+N | next / previous match (surf's own) |
+
+Added, where they don't clash with surf's bindings:
+
+| Keys | Does |
+|---|---|
+| F6, Alt+D | focus the address field |
+| Alt+← / Alt+→ | back / forward (surf's own: Ctrl+H / Ctrl+L) |
+| F5 | reload (surf's own: Ctrl+R) |
+| Ctrl+= / Ctrl+0 | zoom in / reset (surf's own: Ctrl+Shift+K / Ctrl+Shift+Q) |
+| Ctrl+D | bookmark / unbookmark the page |
+| Ctrl+M | bookmarks menu |
+| Esc in the address field | restore the address and return to the page |
+| F11 | fullscreen (surf's own) |
+
+Alt now counts as a modifier for surf's bindings (`CLEANMASK` includes
+`GDK_MOD1_MASK`), so Alt+key no longer triggers the plain-key binding.
 
 DuckDuckGo's HTML version is the default because it is light enough for an
 Atom tablet. Any search URL with `%s` works.
@@ -59,7 +98,7 @@ With Docker, build a package for your architecture:
 git clone https://github.com/ardyln/surf-touch
 cd surf-touch
 ./build-deb.sh i386        # or amd64, arm64
-sudo apt install ./out/surf_2.1+git20250419-1+touch2_i386.deb
+sudo apt install ./out/surf_2.1+git20250419-1+touch3_i386.deb
 ```
 
 Without Docker, on a Debian machine with `deb-src` enabled:
@@ -68,8 +107,8 @@ Without Docker, on a Debian machine with `deb-src` enabled:
 apt-get source surf && sudo apt-get build-dep surf
 cd surf-2.1+git20250419
 cp /path/to/surf-touch/patches/*.patch debian/patches/
-printf 'touchbar.patch\nwayland.patch\n' >> debian/patches/series
-dch -v 2.1+git20250419-1+touch2 'surf-touch'
+printf 'touchbar.patch\nwayland.patch\nextras.patch\n' >> debian/patches/series
+dch -v 2.1+git20250419-1+touch3 'surf-touch'
 dpkg-buildpackage -us -uc -b
 ```
 
@@ -142,6 +181,7 @@ zero is not reported upstream from here.
 
 - `patches/touchbar.patch`: the touch UI
 - `patches/wayland.patch`: Wayland first, Xlib only on X11
+- `patches/extras.patch`: fullscreen button, bookmarks, find bar, Wayland-friendly and common keys
 - `build-deb.sh`: builds the Debian package in a container
 - `LICENSE`: GPL-3.0 for the patches and scripts in this repository
 - `LICENSE.surf`: surf's own MIT licence
