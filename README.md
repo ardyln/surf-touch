@@ -35,7 +35,7 @@ GNOME on Wayland, touch only), but nothing in it is specific to that tablet.
 | − / + | zoom out / in (surf's own zoom) |
 | ⌂ | home page |
 | ☆ | bookmarks menu: *Bookmark this page* / *Remove bookmark*, *Find in page*, then your bookmarks (tap one to open it) |
-| ⛶ | fullscreen on/off; the bar stays visible so you can always leave fullscreen by touch |
+| ⛶ | fullscreen: the bar disappears and the page gets the whole screen; a small translucent ⛶ in the top-right corner (or F11) leaves fullscreen |
 | find bar | appears under the bar for *Find in page* or Ctrl+F: matches as you type, ▲/▼ previous/next, ✕ or Esc closes it |
 
 The buttons never take keyboard focus, so surf's own keybindings keep
@@ -53,6 +53,7 @@ working when a keyboard is attached.
 | `usewayland` | `1` | prefer Wayland; `0` keeps surf on X11 |
 | `bookmarkfile` | `~/.surf/bookmarks` | where bookmarks are kept; `""` removes the ☆ button and menu |
 | `touchfullscreen` | `1` | `0` hides the ⛶ button (F11 still works) |
+| `touchfullscreenbar` | `0` | `1` keeps the touchbar visible in fullscreen instead of the floating ⛶ |
 
 Bookmarks are a plain text file, one `address<TAB>title` per line, so they
 are easy to edit, sync or share by hand.
@@ -80,6 +81,8 @@ Added, where they don't clash with surf's bindings:
 | Ctrl+M | bookmarks menu |
 | Esc in the address field | restore the address and return to the page |
 | F11 | fullscreen (surf's own) |
+
+surf now notices fullscreen changes even when other window states change at the same time (as on Wayland), so the ⛶ button and F11 toggle reliably.
 
 Alt now counts as a modifier for surf's bindings (`CLEANMASK` includes
 `GDK_MOD1_MASK`), so Alt+key no longer triggers the plain-key binding.
