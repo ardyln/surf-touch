@@ -24,10 +24,10 @@ docker run --rm --platform "$PLAT" -v "$HERE":/src:ro -v "$OUT":/out "$IMG" sh -
 	apt-get build-dep -y -qq surf=$VER-$DEBREV >/dev/null
 	cd surf-$VER
 	cp /src/patches/*.patch debian/patches/
-	printf 'touchbar.patch\nwayland.patch\nextras.patch\n' >> debian/patches/series
-	dch -v $VER-$DEBREV+touch3 -D trixie 'surf-touch: touchbar, native Wayland, fullscreen button, bookmarks, Wayland address/find keys (https://github.com/ardyln/surf-touch)'
+	printf 'touchbar.patch\nwayland.patch\nextras.patch\ndarkmode.patch\nheaderbar.patch\n' >> debian/patches/series
+	dch -v $VER-$DEBREV+touch6 -D trixie 'surf-touch: touchbar, native Wayland, fullscreen button, bookmarks, Wayland address/find keys, dark mode follows the desktop, GNOME-style header bar (https://github.com/ardyln/surf-touch)'
 	dpkg-buildpackage -us -uc -b >/dev/null
-	cp ../surf_*+touch3_*.deb /out/
+	cp ../surf_*+touch6_*.deb /out/
 	chown -R $(id -u):$(id -g) /out
 "
 ls -l "$OUT"/*.deb

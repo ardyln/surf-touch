@@ -20,7 +20,36 @@ same `config.h` way of configuring it.
 Written for a Reeder A8iW (8" Bay Trail tablet, 32-bit Debian 13 userland,
 GNOME on Wayland, touch only), but nothing in it is specific to that tablet.
 
-## The touchbar
+## The header bar (default)
+
+GNOME Web-style: a GTK header bar replaces the window title bar, with
+symbolic icons from your icon theme, so it follows the desktop's light/dark
+style like any GNOME app.
+
+```
+[ ‹ ][ › ][ ⟳ ][ Search or enter address ........ ☆ ][ 🔖 ][ ☰ ]  [ × ]
+                                        ☰ menu:  [ − | 100% | + ][ ⤢ ]
+                                                 New Window
+                                                 Find in Page…
+                                                 Home Page
+```
+
+| Control | Does |
+|---|---|
+| ‹ / › | back / forward (greyed out when there is no history) |
+| ⟳ | reload; while a page loads it turns into stop |
+| address entry | same as the touchbar's address field below (search, progress, select-all on tap) |
+| ☆ in the entry | bookmark this page / remove the bookmark; filled when the page is bookmarked |
+| 🔖 | bookmarks menu (your bookmarks, *Find in page*) |
+| ☰ | zoom out / reset (shows the current zoom) / in, fullscreen, a new window, find in page, home page. The zoom buttons keep the menu open |
+
+In fullscreen GTK hides the header bar; a small translucent button in the
+top-right corner (or F11) leaves fullscreen. surf has no tabs: *New Window*
+opens another surf window, as surf always does. `touchheaderbar = 0` brings
+back the classic touchbar below; it is also used automatically for
+`touchbarbottom` and for `-e` embedding.
+
+## The touchbar (`touchheaderbar = 0`)
 
 ```
 [ ◀ ][ ▶ ][ ⟳ ][ address or search ............ ][ − ][ + ][ ⌂ ][ ☆ ][ ⛶ ]
@@ -54,9 +83,24 @@ working when a keyboard is attached.
 | `bookmarkfile` | `~/.surf/bookmarks` | where bookmarks are kept; `""` removes the ☆ button and menu |
 | `touchfullscreen` | `1` | `0` hides the ⛶ button (F11 still works) |
 | `touchfullscreenbar` | `0` | `1` keeps the touchbar visible in fullscreen instead of the floating ⛶ |
+| `touchheaderbar` | `1` | GNOME-style header bar; `0` = the classic touchbar (`touchbarbottom` and `touchfullscreenbar` apply to that one) |
+| `darkfollowsystem` | `1` | dark mode follows the desktop's dark style (see below); `0` leaves it to `DarkMode` |
 
 Bookmarks are a plain text file, one `address<TAB>title` per line, so they
 are easy to edit, sync or share by hand.
+
+### Dark mode
+
+Surf's `DarkMode` asks websites for their own dark style (the CSS
+`prefers-color-scheme: dark` media query) and gives surf's own bar the dark
+GTK theme. Pages without a dark style stay as they are: nothing is inverted
+or recoloured.
+
+With `darkfollowsystem` (default on), `DarkMode` follows the desktop's
+setting, `org.gnome.desktop.interface color-scheme`, which is the dark style
+switch in GNOME and Phosh. It also changes in open windows when you flip the
+switch. A `DarkMode` set per site in `uriparams` takes precedence, and
+Ctrl+Shift+D still toggles it by hand.
 
 ### Keyboard
 
@@ -101,7 +145,7 @@ With Docker, build a package for your architecture:
 git clone https://github.com/ardyln/surf-touch
 cd surf-touch
 ./build-deb.sh i386        # or amd64, arm64
-sudo apt install ./out/surf_2.1+git20250419-1+touch3_i386.deb
+sudo apt install ./out/surf_2.1+git20250419-1+touch6_i386.deb
 ```
 
 Without Docker, on a Debian machine with `deb-src` enabled:
@@ -110,8 +154,8 @@ Without Docker, on a Debian machine with `deb-src` enabled:
 apt-get source surf && sudo apt-get build-dep surf
 cd surf-2.1+git20250419
 cp /path/to/surf-touch/patches/*.patch debian/patches/
-printf 'touchbar.patch\nwayland.patch\nextras.patch\n' >> debian/patches/series
-dch -v 2.1+git20250419-1+touch3 'surf-touch'
+printf 'touchbar.patch\nwayland.patch\nextras.patch\ndarkmode.patch\nheaderbar.patch\n' >> debian/patches/series
+dch -v 2.1+git20250419-1+touch6 'surf-touch'
 dpkg-buildpackage -us -uc -b
 ```
 
@@ -185,6 +229,8 @@ zero is not reported upstream from here.
 - `patches/touchbar.patch`: the touch UI
 - `patches/wayland.patch`: Wayland first, Xlib only on X11
 - `patches/extras.patch`: fullscreen button, bookmarks, find bar, Wayland-friendly and common keys
+- `patches/darkmode.patch`: dark mode follows the desktop's dark style
+- `patches/headerbar.patch`: GNOME Web-style header bar (default) next to the classic touchbar
 - `build-deb.sh`: builds the Debian package in a container
 - `LICENSE`: GPL-3.0 for the patches and scripts in this repository
 - `LICENSE.surf`: surf's own MIT licence

@@ -1,0 +1,307 @@
+diff -ruN work-touch5/config.def.h work/config.def.h
+--- work-touch5/config.def.h	2026-11-22 02:08:04.924941630 +0300
++++ work/config.def.h	2026-11-22 02:07:40.961690499 +0300
+@@ -17,6 +17,9 @@
+ static char *bookmarkfile   = "~/.surf/bookmarks"; /* "" = no bookmarks button/menu */
+ static int touchfullscreen  = 1;   /* 1 = fullscreen button on the touchbar */
+ static int touchfullscreenbar = 0; /* 1 = keep the touchbar in fullscreen (else a floating ⛶ exits) */
++static int touchheaderbar   = 1;   /* 1 = GNOME-style header bar (icons, menu) as the window's
++                                    * title bar; 0 = the classic button row (needed for
++                                    * touchbarbottom, touchfullscreenbar or -e embedding) */
+ 
+ /* dark mode: DarkMode asks websites for their own dark style (CSS prefers-color-scheme) */
+ static int darkfollowsystem = 1;   /* 1 = DarkMode follows the desktop setting
+diff -ruN work-touch5/surf.c work/surf.c
+--- work-touch5/surf.c	2026-11-22 02:08:04.925150075 +0300
++++ work/surf.c	2026-11-22 02:14:51.816476528 +0300
+@@ -116,6 +116,9 @@
+ 	GtkWidget *tb, *tbback, *tbfwd, *tbreload, *tburl; /* touchbar */
+ 	GtkWidget *tbbar, *tbfind, *tbfindentry; /* extras: button row, find bar */
+ 	GtkWidget *tbexit; /* extras: floating exit button in fullscreen */
++	GtkWidget *tbhead, *tbzoom; /* header bar mode: the bar, zoom % in the menu */
++	char *tbstaruri; /* page the bookmark star was last drawn for */
++	int tbloading;
+ 	struct Client *next;
+ } Client;
+ 
+@@ -321,6 +324,11 @@
+ static void bookmarkmenu(Client *c, const Arg *a);
+ static void tbfullscreen(Client *c);
+ static void darkfollow(void);
++static void tbstar(Client *c, int force);
++static char **bmread(void);
++static int bmfind(char **lines, const char *uri);
++static int tbheader; /* header bar mode in use */
++static GtkWidget *tbicon(Client *c, const char *icon, const char *tip, const char *cmd);
+ 
+ #include "config.h"
+ 
+@@ -1407,9 +1415,14 @@
+ 	if (touchbar) {
+ 		GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+ 		GtkWidget *ov = gtk_overlay_new();
++		tbheader = touchheaderbar && !touchbarbottom && !(embed && isx11);
+ 		c->tb = tbcreate(c);
++		if (tbheader)
++			gtk_window_set_titlebar(GTK_WINDOW(c->win), c->tbhead);
+ 		gtk_container_add(GTK_CONTAINER(ov), GTK_WIDGET(c->view));
+-		c->tbexit = tbbutton(c, "⛶", "full");
++		c->tbexit = tbheader ?
++		    tbicon(c, "view-restore-symbolic", "Leave fullscreen", "full") :
++		    tbbutton(c, "⛶", "full");
+ 		gtk_style_context_add_class(gtk_widget_get_style_context(c->tbexit), "surfexit");
+ 		gtk_widget_set_halign(c->tbexit, GTK_ALIGN_END);
+ 		gtk_widget_set_valign(c->tbexit, GTK_ALIGN_START);
+@@ -2077,9 +2090,19 @@
+ 		else
+ 			reload(c, &a);
+ 	} else if (!strcmp(w, "zin")) {
+-		a.i = +1; zoom(c, &a);
++		a.i = +1; zoom(c, &a); tbupdate(c);
++		return; /* keep the menu open while zooming */
+ 	} else if (!strcmp(w, "zout")) {
+-		a.i = -1; zoom(c, &a);
++		a.i = -1; zoom(c, &a); tbupdate(c);
++		return;
++	} else if (!strcmp(w, "zreset")) {
++		a.i = 0; zoom(c, &a); tbupdate(c);
++		return;
++	} else if (!strcmp(w, "new")) {
++		a.v = touchhome; newwindow(c, &a, 0);
++	} else if (!strcmp(w, "find")) {
++		findbar(c, &a);
++		return;
+ 	} else if (!strcmp(w, "home")) {
+ 		a.v = touchhome; loaduri(c, &a);
+ 	} else if (!strcmp(w, "full")) {
+@@ -2136,6 +2159,144 @@
+ 	return b;
+ }
+ 
++/* ---- header bar mode: GNOME Web-like title bar ---- */
++
++static GtkWidget *
++tbicon(Client *c, const char *icon, const char *tip, const char *cmd)
++{
++	GtkWidget *b = gtk_button_new_from_icon_name(icon, GTK_ICON_SIZE_LARGE_TOOLBAR);
++
++	gtk_widget_set_can_focus(b, FALSE);
++	gtk_widget_set_valign(b, GTK_ALIGN_CENTER);
++	gtk_widget_set_tooltip_text(b, tip);
++	g_object_set_data(G_OBJECT(b), "tbcmd", (gpointer)cmd);
++	g_signal_connect(b, "clicked", G_CALLBACK(tbclicked), c);
++	return b;
++}
++
++static void
++tbmenuitem(Client *c, GtkWidget *box, const char *text, const char *cmd)
++{
++	GtkWidget *b = gtk_model_button_new(); /* closes the menu when tapped */
++
++	g_object_set(b, "text", text, NULL);
++	g_object_set_data(G_OBJECT(b), "tbcmd", (gpointer)cmd);
++	g_signal_connect(b, "clicked", G_CALLBACK(tbclicked), c);
++	gtk_box_pack_start(GTK_BOX(box), b, FALSE, FALSE, 0);
++}
++
++/* the ☰ menu: zoom row and fullscreen like GNOME Web, then the commands */
++static GtkWidget *
++tbmenu(Client *c, GtkWidget *relative)
++{
++	GtkWidget *pop = gtk_popover_new(relative);
++	GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
++	GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
++	GtkWidget *zoom = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
++
++	gtk_style_context_add_class(gtk_widget_get_style_context(pop), "surfpop");
++	g_object_set(box, "margin", 6, NULL);
++	gtk_style_context_add_class(gtk_widget_get_style_context(zoom), "linked");
++	gtk_box_pack_start(GTK_BOX(zoom),
++	    tbicon(c, "zoom-out-symbolic", "Zoom out", "zout"), TRUE, TRUE, 0);
++	c->tbzoom = gtk_button_new_with_label("100%");
++	gtk_widget_set_tooltip_text(c->tbzoom, "Reset zoom");
++	gtk_widget_set_can_focus(c->tbzoom, FALSE);
++	g_object_set_data(G_OBJECT(c->tbzoom), "tbcmd", (gpointer)"zreset");
++	g_signal_connect(c->tbzoom, "clicked", G_CALLBACK(tbclicked), c);
++	gtk_box_pack_start(GTK_BOX(zoom), c->tbzoom, TRUE, TRUE, 0);
++	gtk_box_pack_start(GTK_BOX(zoom),
++	    tbicon(c, "zoom-in-symbolic", "Zoom in", "zin"), TRUE, TRUE, 0);
++	gtk_box_pack_start(GTK_BOX(row), zoom, TRUE, TRUE, 0);
++	if (touchfullscreen)
++		gtk_box_pack_start(GTK_BOX(row),
++		    tbicon(c, "view-fullscreen-symbolic", "Fullscreen", "full"),
++		    FALSE, FALSE, 0);
++	gtk_box_pack_start(GTK_BOX(box), row, FALSE, FALSE, 0);
++	gtk_box_pack_start(GTK_BOX(box),
++	    gtk_separator_new(GTK_ORIENTATION_HORIZONTAL), FALSE, FALSE, 6);
++	tbmenuitem(c, box, "New Window", "new");
++	tbmenuitem(c, box, "Find in Page…", "find");
++	tbmenuitem(c, box, "Home Page", "home");
++	gtk_widget_show_all(box);
++	gtk_container_add(GTK_CONTAINER(pop), box);
++	return pop;
++}
++
++static void
++tbstarpress(GtkEntry *e, GtkEntryIconPosition pos, GdkEvent *ev, Client *c)
++{
++	bookmarktoggle(c, NULL);
++}
++
++/* the star in the address entry shows whether this page is bookmarked */
++void
++tbstar(Client *c, int force)
++{
++	const char *uri = geturi(c);
++	char **lines;
++	int have;
++
++	if (!tbheader || !c->tburl || !bookmarkfile || !*bookmarkfile)
++		return;
++	if (!force && c->tbstaruri && uri && !strcmp(c->tbstaruri, uri))
++		return;
++	g_free(c->tbstaruri);
++	c->tbstaruri = g_strdup(uri ? uri : "");
++	lines = bmread();
++	have = uri && bmfind(lines, uri) >= 0;
++	g_strfreev(lines);
++	gtk_entry_set_icon_from_icon_name(GTK_ENTRY(c->tburl),
++	    GTK_ENTRY_ICON_SECONDARY, have ? "starred-symbolic" : "non-starred-symbolic");
++	gtk_entry_set_icon_tooltip_text(GTK_ENTRY(c->tburl), GTK_ENTRY_ICON_SECONDARY,
++	    have ? "Remove bookmark" : "Bookmark this page");
++}
++
++static GtkWidget *
++tbheadercreate(Client *c)
++{
++	GtkWidget *hb = gtk_header_bar_new(), *mb;
++
++	gtk_header_bar_set_show_close_button(GTK_HEADER_BAR(hb), TRUE);
++	gtk_style_context_add_class(gtk_widget_get_style_context(hb), "surftb");
++
++	c->tbback = tbicon(c, "go-previous-symbolic", "Back", "back");
++	c->tbfwd = tbicon(c, "go-next-symbolic", "Forward", "fwd");
++	c->tbreload = tbicon(c, "view-refresh-symbolic", "Reload", "reload");
++	gtk_header_bar_pack_start(GTK_HEADER_BAR(hb), c->tbback);
++	gtk_header_bar_pack_start(GTK_HEADER_BAR(hb), c->tbfwd);
++	gtk_header_bar_pack_start(GTK_HEADER_BAR(hb), c->tbreload);
++
++	c->tburl = gtk_entry_new();
++	gtk_entry_set_input_purpose(GTK_ENTRY(c->tburl), GTK_INPUT_PURPOSE_URL);
++	gtk_entry_set_placeholder_text(GTK_ENTRY(c->tburl), "Search or enter address");
++	gtk_entry_set_width_chars(GTK_ENTRY(c->tburl), 12);
++	gtk_widget_set_hexpand(c->tburl, TRUE);
++	g_signal_connect(c->tburl, "activate", G_CALLBACK(tbactivate), c);
++	g_signal_connect(c->tburl, "focus-in-event", G_CALLBACK(tburlfocus), c);
++	if (bookmarkfile && *bookmarkfile) {
++		gtk_entry_set_icon_from_icon_name(GTK_ENTRY(c->tburl),
++		    GTK_ENTRY_ICON_SECONDARY, "non-starred-symbolic");
++		g_signal_connect(c->tburl, "icon-press", G_CALLBACK(tbstarpress), c);
++	}
++	gtk_header_bar_set_custom_title(GTK_HEADER_BAR(hb), c->tburl);
++
++	/* pack_end: first one is rightmost */
++	mb = gtk_menu_button_new();
++	gtk_widget_set_can_focus(mb, FALSE);
++	gtk_widget_set_valign(mb, GTK_ALIGN_CENTER);
++	gtk_widget_set_tooltip_text(mb, "Menu");
++	gtk_button_set_image(GTK_BUTTON(mb), gtk_image_new_from_icon_name(
++	    "open-menu-symbolic", GTK_ICON_SIZE_LARGE_TOOLBAR));
++	gtk_menu_button_set_popover(GTK_MENU_BUTTON(mb), tbmenu(c, mb));
++	gtk_header_bar_pack_end(GTK_HEADER_BAR(hb), mb);
++	if (bookmarkfile && *bookmarkfile)
++		gtk_header_bar_pack_end(GTK_HEADER_BAR(hb),
++		    tbicon(c, "user-bookmarks-symbolic", "Bookmarks", "bm"));
++	c->tbhead = hb;
++	return hb;
++}
++
+ GtkWidget *
+ tbcreate(Client *c)
+ {
+@@ -2145,10 +2306,15 @@
+ 	    ".surftb button { min-height: %dpx; min-width: %dpx; padding: 0 6px;"
+ 	    " font-size: %dpx; } .surftb entry { min-height: %dpx; font-size: %dpx; }"
+ 	    " .surfmenu menuitem { min-height: %dpx; font-size: %dpx; }"
+-	    " .surfexit { margin: 8px; opacity: 0.55; border-radius: 9999px; }",
++	    " .surfexit { margin: 8px; opacity: 0.55; border-radius: 9999px; }"
++	    " headerbar.surftb { padding: 0 4px; }"
++	    " headerbar.surftb button { padding: 0; font-size: inherit; }"
++	    " .surfpop button, .surfpop modelbutton { min-height: %dpx; min-width: %dpx;"
++	    " font-size: %dpx; } .surfpop modelbutton { padding: 0 12px; }",
+ 	    touchbarheight, touchbarheight, touchbarheight / 2,
+ 	    touchbarheight, touchbarheight * 2 / 5,
+-	    touchbarheight, touchbarheight * 2 / 5);
++	    touchbarheight, touchbarheight * 2 / 5,
++	    touchbarheight, touchbarheight, touchbarheight * 2 / 5);
+ 
+ 	gtk_css_provider_load_from_data(css, style, -1, NULL);
+ 	g_free(style);
+@@ -2157,6 +2323,14 @@
+ 	g_object_unref(css);
+ 	gtk_style_context_add_class(gtk_widget_get_style_context(bar), "surftb");
+ 
++	if (tbheader) {
++		/* the header bar goes into the window title; this box only
++		 * carries the find bar */
++		tbheadercreate(c);
++		c->tbbar = c->tbhead;
++		return tbfindcreate(c, NULL);
++	}
++
+ 	c->tbback = tbbutton(c, "◀", "back");
+ 	c->tbfwd = tbbutton(c, "▶", "fwd");
+ 	c->tbreload = tbbutton(c, "⟳", "reload");
+@@ -2192,7 +2366,24 @@
+ 	loading = webkit_web_view_is_loading(c->view);
+ 	gtk_widget_set_sensitive(c->tbback, webkit_web_view_can_go_back(c->view));
+ 	gtk_widget_set_sensitive(c->tbfwd, webkit_web_view_can_go_forward(c->view));
+-	gtk_button_set_label(GTK_BUTTON(c->tbreload), loading ? "✕" : "⟳");
++	if (tbheader) {
++		if (loading != c->tbloading) {
++			gtk_button_set_image(GTK_BUTTON(c->tbreload),
++			    gtk_image_new_from_icon_name(loading ? "process-stop-symbolic" :
++			    "view-refresh-symbolic", GTK_ICON_SIZE_LARGE_TOOLBAR));
++			gtk_widget_set_tooltip_text(c->tbreload, loading ? "Stop" : "Reload");
++			c->tbloading = loading;
++		}
++		if (c->tbzoom) {
++			char *z = g_strdup_printf("%.0f%%",
++			    webkit_web_view_get_zoom_level(c->view) * 100);
++			gtk_button_set_label(GTK_BUTTON(c->tbzoom), z);
++			g_free(z);
++		}
++		tbstar(c, 0);
++	} else {
++		gtk_button_set_label(GTK_BUTTON(c->tbreload), loading ? "✕" : "⟳");
++	}
+ 	gtk_entry_set_progress_fraction(GTK_ENTRY(c->tburl),
+ 	    loading && c->progress < 100 ? c->progress / 100.0 : 0.0);
+ 	/* don't overwrite what the user is typing */
+@@ -2273,7 +2464,8 @@
+ 	gtk_container_foreach(GTK_CONTAINER(c->tbfind), (GtkCallback)gtk_widget_show_all, NULL);
+ 	gtk_widget_set_no_show_all(c->tbfind, TRUE);
+ 
+-	gtk_box_pack_start(GTK_BOX(outer), bar, FALSE, FALSE, 0);
++	if (bar)
++		gtk_box_pack_start(GTK_BOX(outer), bar, FALSE, FALSE, 0);
+ 	gtk_box_pack_start(GTK_BOX(outer), c->tbfind, FALSE, FALSE, 0);
+ 	return outer;
+ }
+@@ -2282,7 +2474,7 @@
+ void
+ tbfullscreen(Client *c)
+ {
+-	if (!c->tb || touchfullscreenbar)
++	if (!c->tb || (touchfullscreenbar && !tbheader))
+ 		return;
+ 	if (c->fullscreen) {
+ 		gtk_widget_hide(c->tb);
+@@ -2391,6 +2583,7 @@
+ 	g_file_set_contents(bookmarkfile, out, -1, NULL);
+ 	g_free(out);
+ 	g_strfreev(lines);
++	tbstar(c, 1);
+ }
+ 
+ static void
