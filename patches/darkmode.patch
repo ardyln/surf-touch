@@ -1,0 +1,85 @@
+diff -ruN work-touch4/config.def.h work/config.def.h
+--- work-touch4/config.def.h	2026-11-18 21:57:53.946515249 +0300
++++ work/config.def.h	2026-11-22 02:00:30.681385914 +0300
+@@ -18,6 +18,10 @@
+ static int touchfullscreen  = 1;   /* 1 = fullscreen button on the touchbar */
+ static int touchfullscreenbar = 0; /* 1 = keep the touchbar in fullscreen (else a floating ⛶ exits) */
+ 
++/* dark mode: DarkMode asks websites for their own dark style (CSS prefers-color-scheme) */
++static int darkfollowsystem = 1;   /* 1 = DarkMode follows the desktop setting
++                                    * (org.gnome.desktop.interface color-scheme), live */
++
+ /* Webkit default features */
+ /* Highest priority value will be used.
+  * Default parameters are priority 0
+diff -ruN work-touch4/surf.c work/surf.c
+--- work-touch4/surf.c	2026-11-19 15:13:12.365593282 +0300
++++ work/surf.c	2026-11-22 02:00:46.796930377 +0300
+@@ -320,6 +320,7 @@
+ static void bookmarktoggle(Client *c, const Arg *a);
+ static void bookmarkmenu(Client *c, const Arg *a);
+ static void tbfullscreen(Client *c);
++static void darkfollow(void);
+ 
+ #include "config.h"
+ 
+@@ -372,6 +373,7 @@
+ 	}
+ 
+ 	curconfig = defconfig;
++	darkfollow();
+ 
+ 	/* dirs and files */
+ 	cookiefile = buildfile(cookiefile);
+@@ -2477,6 +2479,51 @@
+ }
+ 
+ 
++
++/* ---- dark mode follows the desktop (GNOME/Phosh color-scheme) ---- */
++
++static GSettings *ifacesettings;
++
++static void
++colorschemechanged(GSettings *gs, const char *key, gpointer unused)
++{
++	Client *c;
++	int i;
++	char *v = g_settings_get_string(gs, "color-scheme");
++
++	defconfig[DarkMode].val.i = !strcmp(v, "prefer-dark");
++	g_free(v);
++	/* per-uri parameter sets that don't set DarkMode carry the default */
++	for (i = 0; i < LENGTH(uriparams); ++i)
++		if (uriparams[i].config[DarkMode].prio <= defconfig[DarkMode].prio)
++			uriparams[i].config[DarkMode] = defconfig[DarkMode];
++	/* the GTK setting is per process: one client is enough, but keep the
++	 * parameter bookkeeping of every window right */
++	for (c = clients; c; c = c->next)
++		setparameter(c, 0, DarkMode, &defconfig[DarkMode].val);
++}
++
++void
++darkfollow(void)
++{
++	GSettingsSchema *schema;
++	GSettingsSchemaSource *src = g_settings_schema_source_get_default();
++
++	/* a command line or per-uri DarkMode wins over the desktop */
++	if (!darkfollowsystem || defconfig[DarkMode].prio > 0 || !src)
++		return;
++	if (!(schema = g_settings_schema_source_lookup(src,
++	    "org.gnome.desktop.interface", TRUE)))
++		return;
++	if (g_settings_schema_has_key(schema, "color-scheme")) {
++		ifacesettings = g_settings_new("org.gnome.desktop.interface");
++		g_signal_connect(ifacesettings, "changed::color-scheme",
++		                 G_CALLBACK(colorschemechanged), NULL);
++		colorschemechanged(ifacesettings, "color-scheme", NULL);
++	}
++	g_settings_schema_unref(schema);
++}
++
+ int
+ main(int argc, char *argv[])
+ {
